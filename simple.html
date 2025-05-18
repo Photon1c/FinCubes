@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Schobro4 Money Flow Visualizer</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+  <link type="text/css" rel="stylesheet" href="main.css">
+  <style>
+    body { color: #333; margin: 0; overflow: hidden; }
+    #gui-panel {
+      position: absolute; top: 20px; left: 20px; background: rgba(255,255,255,0.95); padding: 18px 24px; border-radius: 10px;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.12); z-index: 10; font-family: sans-serif;
+    }
+    #gui-panel label { display: block; margin-top: 10px; }
+    #gui-panel input[type=number] { width: 80px; }
+    #gui-panel input[type=range] { width: 120px; }
+    #gui-panel select { width: 100px; }
+    #month-label { font-weight: bold; font-size: 1.1em; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <div id="gui-panel">
+    <label>Income: <input id="income-input" type="number" value="2300" min="0" step="1"> $</label>
+    <label>Expenses: <input id="expenses-input" type="number" value="1200" min="0" step="1"> $</label>
+    <label>Assets: <input id="assets-input" type="number" value="5000" min="0" step="1"> $</label>
+    <label>Liabilities: <input id="liabilities-input" type="number" value="2000" min="0" step="1"> $</label>
+    <label>Period: 
+      <select id="period-select">
+        <option value="month">Per Month</option>
+        <option value="year">Per Year</option>
+      </select>
+    </label>
+    <label>Months: <input id="months-input" type="range" min="1" max="13" value="1"> <span id="month-label">1</span></label>
+    <button id="visualize-btn">Visualize</button>
+  </div>
+  <div id="container"></div>
+  <script src="src/js/ammo.wasm.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./src/js/three.module.js",
+        "three/addons/": "./src/js/"
+      }
+    }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import Stats from 'three/addons/Stats.js';
+    import { OrbitControls } from 'three/addons/OrbitControls.js';
+    let container, stats, camera, controls, scene, renderer;
+    let clock = new THREE.Clock();
+    let physicsWorld, transformAux1;
+    let margin = 0.05;
+    let monthCounter = 1;
+
+    // Instancing variables
+    let incomeInstancedMesh, expenseInstancedMesh;
+    const MAX_FLOW_INSTANCES = 13 * 2; // Max 13 months, 1 income + 1 expense type per month
+    let incomeInstanceData = []; // { body: Ammo.RigidBody | null, active: boolean, labelDiv: HTMLElement | null, originalValue: number, scale: THREE.Vector3 }
+    let expenseInstanceData = []; // Similar structure
+    const offScreenMatrix = new THREE.Matrix4().makeTranslation(0, -10000, 0); // For hiding inactive instances
+
+    let staticVisuals = []; // For static assets and liabilities
+
+    let guiPanel = document.getElementById('gui-panel');
+    let monthLabel = document.getElementById('month-label');
+    document.getElementById('months-input').addEventListener('input', e => {
+      monthCounter = parseInt(e.target.value);
+      monthLabel.textContent = monthCounter;
+    });
+    Ammo().then(function(AmmoLib) {
+      Ammo = AmmoLib;
+      init();
+    });
+    function init() {
+      container = document.getElementById('container');
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xe8f0fa);
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.2, 2000);
+      camera.position.set(-10, 10, 18);
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      container.appendChild(renderer.domElement);
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 3, 0);
+      controls.update();
+      stats = new Stats();
+      stats.domElement.style.position = 'absolute';
+      stats.domElement.style.top = '0px';
+      container.appendChild(stats.domElement);
+      // Lighting
+      scene.add(new THREE.AmbientLight(0xbbbbbb));
+      let light = new THREE.DirectionalLight(0xffffff, 2.5);
+      light.position.set(-10, 20, 10);
+      light.castShadow = true;
+      light.shadow.camera.left = -30;
+      light.shadow.camera.right = 30;
+      light.shadow.camera.top = 30;
+      light.shadow.camera.bottom = -30;
+      light.shadow.camera.near = 2;
+      light.shadow.camera.far = 50;
+      light.shadow.mapSize.x = 1024;
+      light.shadow.mapSize.y = 1024;
+      scene.add(light);
+      // Physics
+      let collisionConfiguration = new Ammo.btDefaultCollisionConfiguration();
+      let dispatcher = new Ammo.btCollisionDispatcher(collisionConfiguration);
+      let broadphase = new Ammo.btDbvtBroadphase();
+      let solver = new Ammo.btSequentialImpulseConstraintSolver();
+      physicsWorld = new Ammo.btDiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfiguration);
+      physicsWorld.setGravity(new Ammo.btVector3(0, -9.8, 0));
+      transformAux1 = new Ammo.btTransform();
+      // Ground
+      let groundGeo = new THREE.BoxGeometry(40, 1, 40);
+      let groundMat = new THREE.MeshPhongMaterial({ color: 0xffffff });
+      let groundMesh = new THREE.Mesh(groundGeo, groundMat);
+      groundMesh.position.set(0, -0.5, 0);
+      groundMesh.receiveShadow = true;
+      scene.add(groundMesh);
+      let groundShape = new Ammo.btBoxShape(new Ammo.btVector3(20, 0.5, 20));
+      let groundTransform = new Ammo.btTransform();
+      groundTransform.setIdentity();
+      groundTransform.setOrigin(new Ammo.btVector3(0, -0.5, 0));
+      let groundMotionState = new Ammo.btDefaultMotionState(groundTransform);
+      let groundRbInfo = new Ammo.btRigidBodyConstructionInfo(0, groundMotionState, groundShape, new Ammo.btVector3(0,0,0));
+      let groundBody = new Ammo.btRigidBody(groundRbInfo);
+      physicsWorld.addRigidBody(groundBody);
+
+      initInstancedFlows(); // Initialize instanced meshes
+
+      // Visualize on button click
+      document.getElementById('visualize-btn').addEventListener('click', visualizeFlows);
+      animate();
+    }
+    function clearFlows() {
+      // Clear non-instanced rigid bodies (spheres)
+      // for (let obj of rigidBodies) {  // This loop is causing the error
+      //   scene.remove(obj.mesh);
+      //   if (obj.mesh.userData.labelDiv) {
+      //     document.body.removeChild(obj.mesh.userData.labelDiv);
+      //     obj.mesh.userData.labelDiv = null;
+      //   }
+      //   if (obj.mesh.geometry) obj.mesh.geometry.dispose();
+      //   if (obj.mesh.material) obj.mesh.material.dispose();
+      //   physicsWorld.removeRigidBody(obj.body);
+      //   if (window.Ammo) {
+      //     Ammo.destroy(obj.body.getCollisionShape());
+      //     Ammo.destroy(obj.body);
+      //   }
+      // }
+      // rigidBodies = []; // This line is also redundant now
+
+      // Clear static visuals (assets/liabilities spheres)
+      for (let visual of staticVisuals) {
+        scene.remove(visual.mesh);
+        if (visual.labelDiv) {
+          document.body.removeChild(visual.labelDiv);
+          visual.labelDiv = null;
+        }
+        if (visual.mesh.geometry) visual.mesh.geometry.dispose();
+        if (visual.mesh.material) visual.mesh.material.dispose();
+      }
+      staticVisuals = [];
+
+      // Clear instanced flows (boxes)
+      for (let i = 0; i < MAX_FLOW_INSTANCES; i++) {
+        if (incomeInstanceData[i] && incomeInstanceData[i].active) {
+          deactivateInstance(incomeInstanceData[i], incomeInstancedMesh, i);
+        }
+        if (expenseInstanceData[i] && expenseInstanceData[i].active) {
+          deactivateInstance(expenseInstanceData[i], expenseInstancedMesh, i);
+        }
+      }
+      if (incomeInstancedMesh) incomeInstancedMesh.instanceMatrix.needsUpdate = true;
+      if (expenseInstancedMesh) expenseInstancedMesh.instanceMatrix.needsUpdate = true;
+    }
+    function deactivateInstance(instanceData, instancedMesh, index) {
+      if (instanceData.body) {
+        physicsWorld.removeRigidBody(instanceData.body);
+        if (window.Ammo) {
+          Ammo.destroy(instanceData.body.getCollisionShape());
+          Ammo.destroy(instanceData.body);
+        }
+        instanceData.body = null;
+      }
+      if (instanceData.labelDiv) {
+        instanceData.labelDiv.style.display = 'none'; // Hide label
+      }
+      instanceData.active = false;
+      instancedMesh.setMatrixAt(index, offScreenMatrix);
+    }
+    function initInstancedFlows() {
+      const baseBoxGeo = new THREE.BoxGeometry(1, 1, 1); // Base geometry for instances
+      const incomeMat = new THREE.MeshPhongMaterial({ color: 0x4caf50 });
+      const expenseMat = new THREE.MeshPhongMaterial({ color: 0xf44336 });
+
+      incomeInstancedMesh = new THREE.InstancedMesh(baseBoxGeo, incomeMat, MAX_FLOW_INSTANCES);
+      incomeInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      incomeInstancedMesh.castShadow = true;
+      incomeInstancedMesh.receiveShadow = true;
+      scene.add(incomeInstancedMesh);
+
+      expenseInstancedMesh = new THREE.InstancedMesh(baseBoxGeo, expenseMat, MAX_FLOW_INSTANCES);
+      expenseInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      expenseInstancedMesh.castShadow = true;
+      expenseInstancedMesh.receiveShadow = true;
+      scene.add(expenseInstancedMesh);
+
+      for (let i = 0; i < MAX_FLOW_INSTANCES; i++) {
+        incomeInstanceData.push({ body: null, active: false, labelDiv: null, originalValue: 0, scale: new THREE.Vector3(1, 1, 1) });
+        expenseInstanceData.push({ body: null, active: false, labelDiv: null, originalValue: 0, scale: new THREE.Vector3(1, 1, 1) });
+        incomeInstancedMesh.setMatrixAt(i, offScreenMatrix);
+        expenseInstancedMesh.setMatrixAt(i, offScreenMatrix);
+      }
+      incomeInstancedMesh.instanceMatrix.needsUpdate = true;
+      expenseInstancedMesh.instanceMatrix.needsUpdate = true;
+    }
+    function addInstancedFlow(type, value, monthIndex, xOffset, zOffset) {
+      const instanceDataArray = type === 'income' ? incomeInstanceData : expenseInstanceData;
+      const instancedMesh = type === 'income' ? incomeInstancedMesh : expenseInstancedMesh;
+
+      let idx = -1;
+      for (let i = 0; i < MAX_FLOW_INSTANCES; i++) {
+        if (!instanceDataArray[i].active) {
+          idx = i;
+          break;
+        }
+      }
+
+      if (idx === -1) {
+        console.warn(`No available instances for ${type}`);
+        return; // Pool is full
+      }
+
+      const data = instanceDataArray[idx];
+      data.active = true;
+      data.originalValue = value;
+
+      const size = Math.max(0.5, Math.log10(value + 1)); // Ensure min size for visibility
+      data.scale.set(size, size, size);
+
+      const yBase = 1 + monthIndex * (size + 1.5); // Stack based on dynamic size + gap
+      const xPos = xOffset;
+      const zPos = zOffset;
+      const position = new THREE.Vector3(xPos, yBase + size / 2, zPos);
+      const quaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(Math.random(),Math.random(),Math.random()).normalize(), Math.random()*Math.PI*0.1);
+
+      // Physics
+      const shape = new Ammo.btBoxShape(new Ammo.btVector3(size / 2, size / 2, size / 2));
+      const transform = new Ammo.btTransform();
+      transform.setIdentity();
+      transform.setOrigin(new Ammo.btVector3(position.x, position.y, position.z));
+      transform.setRotation(new Ammo.btQuaternion(quaternion.x, quaternion.y, quaternion.z, quaternion.w));
+      const mass = size * 2; // Mass proportional to size
+      const localInertia = new Ammo.btVector3(0, 0, 0);
+      shape.calculateLocalInertia(mass, localInertia);
+      const motionState = new Ammo.btDefaultMotionState(transform);
+      const rbInfo = new Ammo.btRigidBodyConstructionInfo(mass, motionState, shape, localInertia);
+      data.body = new Ammo.btRigidBody(rbInfo);
+      physicsWorld.addRigidBody(data.body);
+
+      // Label
+      if (!data.labelDiv) {
+        data.labelDiv = document.createElement('div');
+        data.labelDiv.style.position = 'absolute';
+        data.labelDiv.style.color = '#111';
+        data.labelDiv.style.background = 'rgba(255,255,255,0.85)';
+        data.labelDiv.style.padding = '2px 6px';
+        data.labelDiv.style.borderRadius = '4px';
+        data.labelDiv.style.fontSize = '13px';
+        data.labelDiv.style.pointerEvents = 'none';
+        data.labelDiv.className = 'flow-label instanced-label';
+        document.body.appendChild(data.labelDiv);
+      }
+      data.labelDiv.textContent = `${type.charAt(0).toUpperCase() + type.slice(1)}: $${value.toLocaleString()}`;
+      data.labelDiv.style.display = 'block';
+
+      // Initial matrix for InstancedMesh
+      const matrix = new THREE.Matrix4().compose(position, quaternion, data.scale);
+      instancedMesh.setMatrixAt(idx, matrix);
+      instancedMesh.instanceMatrix.needsUpdate = true;
+    }
+    function createStaticSphere(label, value, color, x, z) {
+      const radius = Math.max(0.7, Math.log10(value + 1) * 0.7);
+      const yPos = radius - 0.5; // Positioned on the ground plane (ground is at y=-0.5, radius is from center)
+      const geo = new THREE.SphereGeometry(radius, 24, 18);
+      const mat = new THREE.MeshPhongMaterial({ color });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(x, yPos, z);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      scene.add(mesh);
+
+      // Add label
+      const div = document.createElement('div');
+      div.textContent = `${label}: $${value.toLocaleString()}`;
+      div.style.position = 'absolute';
+      div.style.color = '#111';
+      div.style.background = 'rgba(255,255,255,0.85)';
+      div.style.padding = '2px 6px';
+      div.style.borderRadius = '4px';
+      div.style.fontSize = '13px';
+      div.style.pointerEvents = 'none';
+      div.className = 'flow-label static-label';
+      document.body.appendChild(div);
+      mesh.userData.labelDiv = div;
+
+      staticVisuals.push({ mesh, labelDiv: div, value });
+    }
+    function visualizeFlows() {
+      clearFlows();
+      let income = parseFloat(document.getElementById('income-input').value) || 0;
+      let expenses = parseFloat(document.getElementById('expenses-input').value) || 0;
+      let assets = parseFloat(document.getElementById('assets-input').value) || 0;
+      let liabilities = parseFloat(document.getElementById('liabilities-input').value) || 0;
+      let period = document.getElementById('period-select').value;
+      let months = parseInt(document.getElementById('months-input').value);
+
+      if (period === 'year') {
+        income /= 12;
+        expenses /= 12;
+        // Assets and Liabilities are typically snapshots, not divided by period unless they are flows like "monthly savings to assets"
+      }
+
+      // Create static Assets and Liabilities ONCE
+      // Position them away from the monthly stacks
+      if (assets > 0) createStaticSphere('Assets', assets, 0x2196f3, 4, -2);
+      if (liabilities > 0) createStaticSphere('Liabilities', liabilities, 0xff9800, 8, -2);
+
+      for (let m = 0; m < months; ++m) {
+        // let yStackOffset = 1 + m * 2.5; // Original logic for sphere Y base - now handled in addInstancedFlow
+
+        if (income > 0) addInstancedFlow('income', income, m, -6, 2); // Use addInstancedFlow
+        if (expenses > 0) addInstancedFlow('expense', expenses, m, -2, 2); // Use addInstancedFlow
+        
+        // Assets and Liabilities remain non-instanced spheres -- REMOVED FROM LOOP
+        // if (assets > 0) dropFlowSphere('Assets', assets, 0x2196f3, 2, yStackOffset, -2);
+        // if (liabilities > 0) dropFlowSphere('Liabilities', liabilities, 0xff9800, 6, yStackOffset, 2);
+      }
+    }
+    function animate() {
+      requestAnimationFrame(animate);
+      let deltaTime = clock.getDelta();
+      if (physicsWorld) physicsWorld.stepSimulation(deltaTime, 10);
+
+      const tempMatrix = new THREE.Matrix4();
+
+      // Update non-instanced rigid bodies (spheres) -- THIS SECTION WILL BE REMOVED
+      // for (let obj of rigidBodies) {
+      //   ...
+      // }
+
+      // Update labels for static visuals (assets/liabilities)
+      for (let visual of staticVisuals) {
+        if (visual.mesh && visual.labelDiv) {
+          let vector = visual.mesh.position.clone().project(camera);
+          let screenX = (vector.x * 0.5 + 0.5) * window.innerWidth;
+          let screenY = (-vector.y * 0.5 + 0.5) * window.innerHeight;
+          visual.labelDiv.style.transform = `translate(-50%, -50%) translate(${screenX}px,${screenY}px)`;
+          visual.labelDiv.style.display = (vector.z > 1 || vector.z < 0 || visual.mesh.position.y < -1) ? 'none' : 'block';
+        }
+      }
+
+      // Update instanced flows (boxes)
+      for (let i = 0; i < MAX_FLOW_INSTANCES; i++) {
+        const instances = [incomeInstanceData, expenseInstanceData];
+        const meshes = [incomeInstancedMesh, expenseInstancedMesh];
+
+        for (let j = 0; j < instances.length; j++) {
+          const data = instances[j][i];
+          const mesh = meshes[j];
+
+          if (data && data.active && data.body) {
+            const ms = data.body.getMotionState();
+            if (ms) {
+              ms.getWorldTransform(transformAux1);
+              const p = transformAux1.getOrigin();
+              const q = transformAux1.getRotation();
+              tempMatrix.compose(new THREE.Vector3(p.x(), p.y(), p.z()), 
+                               new THREE.Quaternion(q.x(), q.y(), q.z(), q.w()), 
+                               data.scale);
+              mesh.setMatrixAt(i, tempMatrix);
+
+              if (data.labelDiv) {
+                const labelPos = new THREE.Vector3(p.x(), p.y(), p.z());
+                let vector = labelPos.project(camera);
+                let screenX = (vector.x * 0.5 + 0.5) * window.innerWidth;
+                let screenY = (-vector.y * 0.5 + 0.5) * window.innerHeight;
+                data.labelDiv.style.transform = `translate(-50%, -50%) translate(${screenX}px,${screenY}px)`;
+                data.labelDiv.style.display = (vector.z > 1 || vector.z < 0) ? 'none' : 'block';
+              }
+            }
+          }
+        }
+      }
+      if (incomeInstancedMesh) incomeInstancedMesh.instanceMatrix.needsUpdate = true;
+      if (expenseInstancedMesh) expenseInstancedMesh.instanceMatrix.needsUpdate = true;
+
+      renderer.render(scene, camera);
+      stats.update();
+    }
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html> 
