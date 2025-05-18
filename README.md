@@ -1,11 +1,9 @@
-# FinCubes
-Multidimensional financial visualization framework with a Three.js instancing technique
+# FinCubes 🧊🧊🧊 
+🧊🧊🧊 Multidimensional financial visualization framework with a Three.js instancing technique
 
 ![fincubes](media/fincubes.PNG)
 
 Quick Deploy: To deploy simply view with an http server served. 
-
-# 💸 FinCubes: 3D Financial Visualization Playground 🚀
 
 # 💸 FinCubes: 3D Financial Visualization Playground 🚀
 
@@ -111,4 +109,4 @@ MIT License. Use, remix, and share!
 
 ---
 
-Made with ❤️, JavaScript, and a love of data. 
+Made with Cursor IDE, JavaScript, and a love of data. 
